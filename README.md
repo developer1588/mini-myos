@@ -1,3 +1,54 @@
+# Setup
+
+## Tests and setup
+
+A docker is required to run the tests and setup the localstack environment. The tests are written in TypeScript and use Jest as a test runner. The project uses AWS CDK to deploy the localstack environment.
+
+For issues with the docker setup please see `compose.yml` and adjust the volumes.
+
+Run the following commands to set up the project:
+
+```bash
+# Install dependencies
+npx npm install
+
+# Build the localstack environment
+# Preferably run this in a separate terminal
+npx npm run test:setup
+
+# Deploy localstack locally
+npx npm run test:deploy
+
+# Run the tests
+npx npm run test:run
+
+# Run linter
+npx npm run lint
+```
+
+## Agent tests
+
+Currently there is one simple agent implementation that can be used to test the system. It is a part of cdk stack and can be found in `lambda/agent.ts`. It is not needed to run the code, but it can be used to test the system.
+
+Agent tests are part of the test suite. But can be run separately with the following command (assuming the localstack is running):
+
+```bash
+npx jest --maxWorkers=1 tests/integration/agent.test.ts
+```
+
+## Decision reasonings
+
+The architecture was built to be the most cost-effective as possible, however, some decisions were made to ensure the system is scalable and maintainable (i.e. using serverless services like Lambda, DynamoDB, and Kinesis). The biggest problem was to maintain the order of the events for each subscriber with the given constraints, as the typical SNS + SQS setup has lower limits on throughput.
+
+In order to ensure the events processing guarantees, the settings like Maximum batch size of the DynamoDB stream can be adjusted (i.e. to add some delay before the events are processed).
+
+## Future improvements
+
+- Decouple CDK stack into smaller modules with Constructs.
+- Tweak the settings of the Kinesis Data Stream, DynamoDB Streams, and SQS FIFO queue to optimize the performance and cost.
+- Perform a test load to see how the system behaves under high traffic.
+- Consider changing Lambda into Step Functions to avoid concurrent Lambda limitations.
+
 # Architecture Overview
 
 ## High level diagram
@@ -31,10 +82,10 @@
                                    +----------------------+
                                             |
                                             \/
-                                   +-----------------------+
-                                   | DynamoDB              |
-                                   | SubsriberEvents Table |
-                                   +-----------------------+
+                                   +------------------------+
+                                   | DynamoDB               |
+                                   | SubscriberEvents Table |
+                                   +------------------------+
                                             |
                                             | (DynamoDB Streams)
                                             |
@@ -59,15 +110,11 @@
 
 ## Explanation
 
-### Motivation
-
-The requirements specify a high volume of events and subscribers, which exceeds the throughput of simple SNS + SQS patterns. This architecture leverages AWS managed services to achieve cost-effective, scalable processing while ensuring strict ordering guarantees.
-
 ### Flow
 
 #### Kinesis Data Stream (KDS) as Buffer
-
-Producers publish events to a Kinesis Data Stream, either via API Gateway (POST /events) or direct PutRecord calls to Kinesis (to reduce API Gateway costs at scale). KDS provides a durable, partitioned buffer (24‑hour retention) for parallel downstream processing, partitioned by `agentId`.
+:
+Producers publish events to a Kinesis Data Stream, either via API Gateway (POST /events) or direct PutRecord calls to Kinesis (to reduce API Gateway costs at scale). KDS provides a durable, partitioned buffer (24-hour retention) for parallel downstream processing, partitioned by `agentId`.
 
 Example:
 
@@ -77,7 +124,7 @@ Example:
       Data:         JSON.stringify(event),
     });
 
-Each event has the form:
+Each event may have the form:
 
     {
       "agentId": "unique-agent-id",
@@ -90,78 +137,15 @@ Each event has the form:
 
 A Lambda function, triggered per Kinesis shard, groups incoming records by agentId, retrieves the subscribers for each agentId from the Subscribers table, and writes one event entry per subscriber into the SubscriberEvents DynamoDB table. The table’s composite primary key (subscriberId, timestamp) ensures efficient, timestamp-ordered queries.
 
-Example:
-
-```javascript
-exports.handler = async (event) => {
-  // Group Kinesis data by agentId
-  const recordsByAgent = {};
-  for (const record of event.Records) {
-    const agentId = record.kinesis.partitionKey;
-    const encodedData = record.kinesis.data;
-    (recordsByAgent[agentId] ??= []).push(encodedData);
-  }
-
-  // Process each agent group
-  for (const agentId in recordsByAgent) {
-    // Fetch subscribers for this agent
-    const subscribers = await queryDynamo(SUBSCRIBERS_TABLE, { agentId });
-    if (!subscribers.length) continue;
-
-    // Write an event for each subscriber and record
-    for (const { subscriberId } of subscribers) {
-      for (const dataStr of recordsByAgent[agentId]) {
-        const writes = recordsByAgent[agentId].map(event => ({
-          PutRequest: { Item: {
-            subscriberId,
-            timestamp: event.timestamp,
-            data: event.data,
-          } }
-        }));
-
-        await batchWriteSubscriberEvents(writes);
-      }
-    }
-  }
-
-  return { statusCode: 200 };
-};
-```
-
 #### Publisher Lambda Function
 
 Triggered by DynamoDB Streams on the SubscriberEvents table, this Lambda reads new items, groups them by subscriberId, sorts by timestamp, and sends ordered batches of messages to a dedicated SQS FIFO queue per subscriber. FIFO queues preserve message order and deduplicate via MessageDeduplicationId.
-
-Example code:
-
-```javascript
-exports.handler = async (event) => {
-  // 1. Group DynamoDB stream record keys by subscriberId
-  const recordsBySubscriber = groupKeys(event.Records);
-
-  // 2. For each subscriber:
-  for (const subscriberId in recordsBySubscriber) {
-
-    // a) Sort timestamps
-    const timestamps = sort(recordsBySubscriber[subscriberId]);
-
-    // b) Batch-read events from DynamoDB
-    const events = batchGetItems(SUBSCRIER_EVENTS_TABLE, subscriberId, timestamps);
-
-    // c) Send events to SQS FIFO in batches
-    sendInBatches(events, subscriberId, process.env.DISPATCH_DELAY_SECONDS);
-  }
-
-  return { statusCode: 200 };
-};
-```
 
 #### Agent Consumption
 
 Each agent polls its own SQS FIFO queue for messages. FIFO semantics guarantee that messages are delivered in the exact order they were written, allowing agents to process events sequentially. Agents can use long polling to reduce costs and improve efficiency.
 
 # API Reference
-
 ## 1. Register Agent
 
 **Endpoint**
@@ -170,20 +154,26 @@ Each agent polls its own SQS FIFO queue for messages. FIFO semantics guarantee t
 
 **Description**
 
-Create a new agent. Returns a unique `agentId`.
-Creates a record in DynamoDB with the agentId and an empty list of subscriptions.
+Register a new agent with a resource ARN. If an agent with the same resourceArn already exists, returns the existing agent data. Otherwise, creates a new agent with a unique agentId and dedicated SQS FIFO queue, then grants the resourceArn permission to poll the queue.
 
 **Request**
 
-    {}
+    {
+        "resourceArn": "arn:aws:iam::123456789012:role/MyRole"
+    }
 
 **Response**
 
-201 Created
+200 OK (existing agent) or 200 OK (new agent)
 
     {
-        "agentId": "unique-agent-id"
+        "agentId": "unique-agent-id",
+        "queueUrl": "https://sqs.region.amazonaws.com/account/agents-agentId.fifo",
+        "resourceArn": "arn:aws:iam::123456789012:role/MyRole"
     }
+
+400 Bad Request - resourceArn is required
+500 Internal Server Error - server error
 
 ## 2. Subscribe to a Producer
 
@@ -210,15 +200,17 @@ Writes a record in the Subscribers table linking the agentId (listenerId) to the
 - **Table Name**: Agents
 - **Primary Key**:
   - Partition Key: `agentId` (string)
+- **Global Secondary Index**: `resourceArn-index`
 - **Attributes**:
-    - `createdAt` (string, ISO 8601 format): The timestamp when the agent was created.
-    - `subscriptions` (list): A list of subscriptions for the agent, each containing `producerId`.
+  - `agentId` (string): Unique identifier for the agent.
+  - `queueUrl` (string): The SQS FIFO queue URL for this agent.
+  - `createdAt` (string, ISO 8601 format): The timestamp when the agent was created.
 
 ## SubscriberEvents Table
 
 - **Table Name**: SubscriberEvents
 - **Primary Key**:
-  - Partition Key: `subcriberId` (string)
+  - Partition Key: `subscriberId` (string)
   - Sort Key: `timestamp` (string, ISO 8601 format with milliseconds)
 - **Attributes**:
     - `data` (map): The event data.
