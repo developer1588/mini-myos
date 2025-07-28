@@ -1,0 +1,3 @@
+{
+  "app": "node --experimental-strip-types bin/app.ts"
+}

@@ -1,0 +1,47 @@
+{
+  "name": "myos-cdk-app",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Mini MyOS event ordering fabric with AWS CDK",
+  "main": "bin/app.ts",
+  "scripts": {
+    "lint": "npx eslint",
+    "test:setup": "docker-compose up",
+    "test:deploy": "npx cdklocal bootstrap && npx cdklocal deploy --require-approval never",
+    "test:run": "npx jest --maxWorkers=1 --coverage"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.848.0",
+    "@aws-sdk/client-kinesis": "^3.848.0",
+    "@aws-sdk/client-sqs": "^3.854.0",
+    "@aws-sdk/lib-dynamodb": "^3.850.0",
+    "aws-cdk-lib": "^2.207.0",
+    "constructs": "^10.0.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-cloudformation": "^3.848.0",
+    "@aws-sdk/client-lambda": "^3.851.0",
+    "@types/aws-lambda": "^8.10.152",
+    "@types/aws-sdk": "^0.0.42",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.0.0",
+    "@types/uuid": "^10.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.38.0",
+    "@typescript-eslint/parser": "^8.38.0",
+    "aws-cdk-local": "^3.0.1",
+    "aws-sdk-client-mock": "^4.1.0",
+    "axios": "^1.11.0",
+    "cdk": "^2.1022.0",
+    "dotenv": "^17.2.1",
+    "eslint": "^9.32.0",
+    "eslint-cdk-plugin": "^3.2.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.2.1",
+    "eslint-plugin-simple-import-sort": "^12.1.1",
+    "jest": "^30.0.5",
+    "prettier": "^3.3.3",
+    "ts-jest": "^29.4.0",
+    "typescript": "^5.8.3"
+  }
+}
